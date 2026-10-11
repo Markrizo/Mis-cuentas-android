@@ -388,7 +388,7 @@ function viewAjustes() {
   <p class="small muted" style="line-height:1.4">Tus datos solo están en este iPhone. Exporta una copia de vez en cuando y guárdala en Archivos o iCloud Drive.</p>
   <ul class="list">
     <li><button class="setrow" data-act="export"><span>Exportar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span></button></li>
-    <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" accept="application/json,.json" data-act="import" class="hide"></label></li>
+    <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" data-act="import" class="hide"></label></li>
     <li><button class="setrow danger" data-act="wipe"><span>Borrar todos los datos</span></button></li>
   </ul>
   <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v2</p>
@@ -847,15 +847,23 @@ function exportData() {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 function importData(file) {
+  toast('Leyendo copia…');
   const r = new FileReader();
+  r.onerror = () => toast('No se pudo leer el archivo');
   r.onload = () => {
+    let d;
     try {
-      const d = JSON.parse(r.result);
-      if (!d || typeof d !== 'object' || !d.months) throw new Error('formato');
-      if (!confirm('¿Reemplazar los datos actuales por los de la copia?')) return;
-      data = Object.assign(emptyData(), d);
-      save(); render(); toast('Copia importada');
-    } catch (e) { toast('El archivo no es una copia válida'); }
+      d = JSON.parse(String(r.result).replace(/^\uFEFF/, ''));
+      if (!d || typeof d !== 'object' || !d.months || typeof d.months !== 'object') throw new Error('formato');
+    } catch (e) { toast('El archivo no es una copia de Mis Cuentas'); return; }
+    // Copia de seguridad de lo que había, por si acaso (sin diálogos: en Android a veces no aparecen).
+    try { localStorage.setItem(STORE_KEY + '.antes-de-importar', JSON.stringify(data)); } catch (e) { /* sin espacio */ }
+    data = Object.assign(emptyData(), d);
+    save();
+    ui.tab = 'inicio'; ui.histKey = null; ui.sheet = null;
+    render();
+    const nm = Object.keys(data.months).length, np = (data.positions || []).length;
+    toast(`Copia importada: ${nm} ${nm === 1 ? 'mes' : 'meses'}, ${np} posiciones`);
   };
   r.readAsText(file);
 }

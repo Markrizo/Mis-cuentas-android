@@ -391,7 +391,7 @@ function viewAjustes() {
     <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" data-act="import" class="hide"></label></li>
     <li><button class="setrow danger" data-act="wipe"><span>Borrar todos los datos</span></button></li>
   </ul>
-  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v2</p>
+  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v4</p>
   </main>`;
   return h;
 }
@@ -920,7 +920,13 @@ app.addEventListener('keydown', (ev) => {
   }
 });
 // Al volver a la app, si ha cambiado el mes, se crea el nuevo automáticamente.
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !ui.sheet) render(); });
+// Solo si de verdad ha cambiado el mes: redibujar al volver del selector de archivos de Android
+// destruía el campo "Importar copia" antes de que llegara el archivo elegido.
+let renderedMonth = curKey();
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || ui.sheet) return;
+  if (curKey() !== renderedMonth) { renderedMonth = curKey(); render(); }
+});
 
 // Botón "atrás" de Android: cierra la hoja abierta en vez de salir de la app.
 window.addEventListener('popstate', () => {

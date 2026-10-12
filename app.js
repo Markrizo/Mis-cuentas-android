@@ -205,8 +205,29 @@ function sortedMovs(key) {
   return m.movs.slice().sort((a, b) => (b.date + b.created).localeCompare(a.date + a.created));
 }
 
+// ---------- Contraseña de acceso ----------
+// Se guarda solo un resumen (hash SHA-256 con sal), nunca la contraseña. Va aparte de los datos,
+// así que no viaja en las copias exportadas. Es una pantalla de bloqueo: no cifra los datos.
+const LOCK_KEY = 'misCuentas.lock';
+const LOCK_AFTER_MS = 60 * 1000;
+function getLock() {
+  try { const l = JSON.parse(localStorage.getItem(LOCK_KEY) || 'null'); return l && l.hash && l.salt ? l : null; } catch (e) { return null; }
+}
+async function hashPin(pin, salt) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(salt + '|' + pin));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+async function setLock(pin) {
+  const salt = Array.from(crypto.getRandomValues(new Uint8Array(16))).map((b) => b.toString(16).padStart(2, '0')).join('');
+  localStorage.setItem(LOCK_KEY, JSON.stringify({ salt, hash: await hashPin(pin, salt) }));
+}
+async function checkPin(pin) {
+  const l = getLock();
+  return !!l && (await hashPin(pin, l.salt)) === l.hash;
+}
+
 // ---------- Estado de la interfaz ----------
-const ui = { tab: 'inicio', sheet: null, form: {}, histKey: null, toast: '', updating: false };
+const ui = { tab: 'inicio', sheet: null, form: {}, histKey: null, toast: '', updating: false, locked: !!getLock(), lockErr: '', forgot: false };
 let toastTimer = null;
 function toast(msg) {
   ui.toast = msg;
@@ -217,7 +238,37 @@ function toast(msg) {
 
 // ---------- Render ----------
 const app = document.getElementById('app');
+function lockScreen() {
+  return `<main class="screen" style="justify-content:center;align-items:stretch;padding-bottom:calc(var(--safe-bottom) + 40px)">
+  <div style="display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center">
+    <span style="width:64px;height:64px;border-radius:20px;background:var(--green-bg);color:var(--green);display:flex;align-items:center;justify-content:center">${icon('M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4', 30, 2)}</span>
+    <h1 class="title" style="font-size:26px">Mis Cuentas</h1>
+    <p class="muted small">${ui.forgot ? 'Sin la contraseña solo se puede entrar borrando todos los datos de este móvil.' : 'Introduce tu contraseña'}</p>
+  </div>
+  ${ui.forgot ? `
+  <div class="form"><label class="field"><span>Escribe BORRAR</span><input id="wipe-confirm" autocomplete="off" autocapitalize="characters"></label></div>
+  <button class="primary" data-act="lock-wipe" style="background:var(--red);color:#2A0606">Borrar datos y quitar contraseña</button>
+  <button class="secondary" data-act="lock-back">Volver</button>` : `
+  <div class="form"><label class="field"><span>Contraseña</span><input id="lock-pin" type="password" autocomplete="current-password" enterkeyhint="go" autofocus></label></div>
+  ${ui.lockErr ? `<p class="small red" style="text-align:center">${esc(ui.lockErr)}</p>` : ''}
+  <button class="primary" data-act="unlock">Entrar</button>
+  <button class="secondary" data-act="lock-forgot" style="font-size:14px;color:var(--text2)">¿Has olvidado la contraseña?</button>`}
+  </main><div id="sheet-root"></div><div id="toast-root"></div>`;
+}
+async function tryUnlock() {
+  const i = document.getElementById('lock-pin');
+  const pin = i ? i.value : '';
+  if (!pin) return;
+  if (await checkPin(pin)) {
+    ui.locked = false; ui.lockErr = ''; render();
+    if (data.pending.length && ui.tab === 'inicio') openAP();
+  } else {
+    ui.lockErr = 'Contraseña incorrecta'; render();
+    const n = document.getElementById('lock-pin'); if (n) n.focus();
+  }
+}
 function render() {
+  if (ui.locked) { app.innerHTML = lockScreen(); renderToast(); return; }
   ensureMonth(curKey());
   let html = '';
   if (ui.tab === 'inicio') html += viewInicio();
@@ -435,7 +486,7 @@ function viewInversiones() {
     <ul class="list">${ps.map((p) => {
       const g = p.valor - p.aportado, gp = p.aportado > 0 ? (g / p.aportado) * 100 : 0;
       return `<li><button class="mov" data-act="pos" data-id="${p.id}">
-        <span class="txt"><span class="t">${esc(p.name)}</span><span class="s">${esc(p.note || 'Aportado ' + fmt(p.aportado))}${p.ticker ? ' · ' + esc(p.ticker) + (p.price > 0 ? ' ' + fmtNum(p.price) + ' €' : '') : ''}</span></span>
+        <span class="txt"><span class="t">${esc(p.name)}</span><span class="s">${esc(p.note || 'Aportado ' + fmt(p.aportado))}${p.ticker ? ' · ' + esc(p.ticker) + (p.price > 0 ? ' ' + fmtNum(p.price) + ' €' : '') : ''}${p.manualAt ? ' · valor a mano ' + shortD(p.manualAt.slice(0, 10)) : p.priceTime ? ' · precio del ' + shortD(isoOf(new Date(p.priceTime))) : ''}</span></span>
         <span class="a2"><span class="a">${fmt(p.valor)}</span><span class="xs ${signCls(g)}">${signTxt(g)} € · ${signTxt(gp)} %</span></span></button></li>`;
     }).join('')}</ul>`;
   });
@@ -455,6 +506,7 @@ function viewAjustes() {
     <li><label class="setrow"><span>Día de cobro</span><span class="chev"><select data-act="payday" aria-label="Día de cobro" style="background:none;border:0;color:var(--text2);font:inherit;font-size:16px;text-align:right;-webkit-appearance:none;appearance:none">${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}" ${payDay() === i + 1 ? 'selected' : ''}>${i === 0 ? 'Día 1 (mes natural)' : 'Día ' + (i + 1)}</option>`).join('')}</select>${icon(P.chev, 16, 2)}</span></label></li>
     ${payDay() > 1 ? `<li><label class="setrow"><span>Llamar al periodo por el mes siguiente<br><span class="xs muted">Ahora: ${monthName(curKey())} = ${periodRange(curKey())}</span></span><input class="sw" type="checkbox" role="switch" data-act="paynext" ${data.payNext ? 'checked' : ''}></label></li>` : ''}
     <li><button class="setrow" data-act="price-url"><span>Servicio de precios</span><span class="chev">${data.priceUrl ? 'Configurado' : 'Sin configurar'}${icon(P.chev, 16, 2)}</span></button></li>
+    <li><button class="setrow" data-act="lock-set"><span>Contraseña de acceso</span><span class="chev">${getLock() ? 'Activada' : 'Desactivada'}${icon(P.chev, 16, 2)}</span></button></li>
     <li><button class="setrow" data-act="help-ap"><span>Detectar pagos con ${WALLET}</span><span class="chev">Configurar${icon(P.chev, 16, 2)}</span></button></li>
   </ul>`;
   if (rules.length) {
@@ -469,7 +521,7 @@ function viewAjustes() {
     <li><label class="setrow" style="cursor:pointer"><span>Importar copia</span><span class="chev">${icon(P.chev, 16, 2)}</span><input type="file" data-act="import" class="hide"></label></li>
     <li><button class="setrow danger" data-act="wipe"><span>Borrar todos los datos</span></button></li>
   </ul>
-  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v5</p>
+  <p class="xs muted" style="text-align:center;margin-top:8px">Mis Cuentas · v6</p>
   </main>`;
   return h;
 }
@@ -499,6 +551,7 @@ function renderSheet() {
   else if (ui.sheet === 'mov') inner = sheetMov(f);
   else if (ui.sheet === 'pos') inner = sheetPos(f);
   else if (ui.sheet === 'help-ap') inner = sheetHelpAP();
+  else if (ui.sheet === 'lock') inner = sheetLock(f);
   root.innerHTML = inner;
 }
 
@@ -634,10 +687,27 @@ function sheetPos(f) {
     <label class="field"><span>Ticker o ISIN</span><input data-field="ticker" value="${esc(f.ticker)}" placeholder="Ej. AAPL, IE00B42W3S00" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
     <label class="field"><span>Participaciones</span><input data-field="units" value="${esc(f.units)}" placeholder="Opcional" inputmode="decimal" autocomplete="off"></label>
   </div>
-  <p class="xs muted" style="line-height:1.4;margin-top:-6px">Con ticker o ISIN, el botón de actualizar busca el precio. Si no pones participaciones, se calculan con el valor actual. Déjalo vacío para lo que no tiene precio público, como la Cartera Indie.</p>
+  <p class="xs muted" style="line-height:1.4;margin-top:-6px">Pon las <b>participaciones</b> exactas que te muestra tu banco o bróker: el valor se calcula como participaciones × precio. Los fondos publican su precio con 1-2 días de retraso; si cambias el valor actual a mano, se respeta hasta que llegue un precio más nuevo. Con ticker o ISIN, el botón de actualizar busca el precio. Si no pones participaciones, se calculan con el valor actual. Déjalo vacío para lo que no tiene precio público, como la Cartera Indie.</p>
   <datalist id="plats">${[...new Set(data.positions.map((p) => p.platform))].map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
   <button class="primary" data-act="save-pos">Guardar</button>
   ${f.id ? `<button class="secondary danger" data-act="pos-del">Eliminar posición</button>` : ''}
+  </div>`;
+}
+
+function sheetLock(f) {
+  const has = !!getLock();
+  return `<div class="backdrop" data-act="close"></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Contraseña de acceso">
+  <div class="grabber"></div>
+  <h2 class="h2">${has ? 'Cambiar contraseña' : 'Poner contraseña'}</h2>
+  <p class="small muted" style="line-height:1.4">La app te la pedirá al abrirla y al volver a ella tras un minuto fuera. Si la olvidas, solo podrás entrar borrando los datos, así que exporta una copia antes.</p>
+  <div class="form">
+    ${has ? `<label class="field"><span>Actual</span><input type="password" data-field="cur" autocomplete="current-password"></label>` : ''}
+    <label class="field"><span>Nueva</span><input type="password" data-field="pin1" autocomplete="new-password" placeholder="Mínimo 4 caracteres"></label>
+    <label class="field"><span>Repetir</span><input type="password" data-field="pin2" autocomplete="new-password"></label>
+  </div>
+  <button class="primary" data-act="lock-save">Guardar contraseña</button>
+  ${has ? `<button class="secondary danger" data-act="lock-remove">Quitar contraseña</button>` : ''}
   </div>`;
 }
 
@@ -809,7 +879,11 @@ async function updatePrices() {
       if (!r.ok || !(j.priceEUR > 0)) throw new Error(j.error || 'sin precio');
       if (!(p.units > 0)) p.units = p.valor > 0 ? p.valor / j.priceEUR : 0;
       p.price = j.priceEUR; p.priceAt = new Date().toISOString(); p.symbol = j.symbol;
-      if (p.units > 0) p.valor = round2(p.units * j.priceEUR);
+      p.priceTime = j.time || null;
+      // Si has puesto el valor a mano, no lo pisa un precio más antiguo que tu dato
+      // (los fondos publican su valor liquidativo con 1-2 días de retraso).
+      const manualWins = p.manualAt && (!j.time || new Date(j.time) <= new Date(p.manualAt));
+      if (p.units > 0 && !manualWins) { p.valor = round2(p.units * j.priceEUR); delete p.manualAt; }
     } catch (e) { fails.push(p.name); }
   }));
   ui.updating = false;
@@ -947,6 +1021,10 @@ function handleAction(el, ev) {
       rec.price = sameTicker ? old.price || 0 : 0;
       rec.units = parseUnits(f.units) || (rec.price > 0 && rec.valor > 0 ? rec.valor / rec.price : 0);
       if (!rec.ticker) { rec.price = 0; rec.units = 0; }
+      // Valor actual cambiado a mano: se respeta hasta que llegue un precio más reciente.
+      if (old && rec.ticker && Math.abs(rec.valor - (old.valor || 0)) >= 0.005) rec.manualAt = new Date().toISOString();
+      else if (old && old.manualAt && rec.ticker) rec.manualAt = old.manualAt;
+      if (old && !rec.manualAt) delete old.manualAt;
       if (old) Object.assign(old, rec);
       else data.positions.push(Object.assign({ id: uid() }, rec));
       save(); ui.sheet = null; render(); toast('Posición guardada'); break;
@@ -955,6 +1033,30 @@ function handleAction(el, ev) {
       data.positions = data.positions.filter((x) => x.id !== f.id);
       save(); ui.sheet = null; render(); toast('Posición eliminada'); break;
     case 'help-ap': openSheet('help-ap'); break;
+    case 'lock-set': openSheet('lock', { cur: '', pin1: '', pin2: '' }); break;
+    case 'lock-save': (async () => {
+      if (getLock() && !(await checkPin(f.cur || ''))) { toast('La contraseña actual no es correcta'); return; }
+      if ((f.pin1 || '').length < 4) { toast('Usa al menos 4 caracteres'); return; }
+      if (f.pin1 !== f.pin2) { toast('Las contraseñas no coinciden'); return; }
+      try { await setLock(f.pin1); } catch (e) { toast('No se pudo guardar la contraseña'); return; }
+      ui.sheet = null; ui.form = {}; render(); toast('Contraseña guardada');
+    })(); break;
+    case 'lock-remove': (async () => {
+      if (!(await checkPin(f.cur || ''))) { toast('Escribe la contraseña actual para quitarla'); return; }
+      localStorage.removeItem(LOCK_KEY);
+      ui.sheet = null; ui.form = {}; render(); toast('Contraseña quitada');
+    })(); break;
+    case 'unlock': tryUnlock(); break;
+    case 'lock-forgot': ui.forgot = true; render(); break;
+    case 'lock-back': ui.forgot = false; render(); break;
+    case 'lock-wipe': {
+      const c = document.getElementById('wipe-confirm');
+      if (!c || c.value.trim().toUpperCase() !== 'BORRAR') { toast('Escribe BORRAR para confirmar'); return; }
+      localStorage.removeItem(LOCK_KEY);
+      data = emptyData(); save();
+      ui.locked = false; ui.forgot = false; ui.tab = 'inicio'; render(); toast('Datos borrados');
+      break;
+    }
     case 'copy-link':
       navigator.clipboard.writeText(appURL() + '?pago=1&comercio=TITULO&texto=TEXTO').then(() => toast('Enlace copiado'), () => toast('No se pudo copiar'));
       break;
@@ -1066,6 +1168,7 @@ app.addEventListener('change', (ev) => {
   if (act === 'import' && el.files && el.files[0]) { importData(el.files[0]); el.value = ''; return; }
 });
 app.addEventListener('keydown', (ev) => {
+  if (ui.locked && ev.key === 'Enter' && ev.target.id === 'lock-pin') { ev.preventDefault(); tryUnlock(); return; }
   if (ev.key === 'Enter' && ev.target.tagName === 'INPUT' && ui.sheet === 'add') {
     const btn = app.querySelector('[data-act="save-add"]');
     if (btn && !btn.disabled) { ev.target.blur(); handleAction(btn, ev); }
@@ -1074,8 +1177,13 @@ app.addEventListener('keydown', (ev) => {
 // Solo si de verdad ha cambiado el mes: redibujar al volver del selector de archivos de Android
 // destruía el campo "Importar copia" antes de que llegara el archivo elegido.
 let renderedMonth = curKey();
+let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden || ui.sheet) return;
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (getLock() && !ui.locked && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER_MS) {
+    ui.locked = true; ui.sheet = null; ui.form = {}; render(); return;
+  }
+  if (ui.sheet) return;
   if (curKey() !== renderedMonth) { renderedMonth = curKey(); render(); }
 });
 
@@ -1087,7 +1195,7 @@ window.addEventListener('popstate', () => {
 
 const incoming = handleIncomingURL();
 render();
-if (incoming) openAP();
+if (incoming && !ui.locked) openAP();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
